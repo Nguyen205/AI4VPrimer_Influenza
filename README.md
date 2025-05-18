@@ -53,3 +53,11 @@ Merges multiple FASTA files into a single consolidated file for easier data hand
 Great for managing large datasets by simplifying FASTA file consolidation for further analysis or sharing.
 
 ---
+## 🧬 Target Selection and Sequence Data
+
+After inspecting nucleotide identity across viral genomes, we chose to focus on the **M**, **NA**, and **HA** segments for further degenerate primer set design. 
+
+The sequences located directly under the `main` directory include:
+- Segment sequences (M, NA, HA) from various **Influenza A subtypes** (e.g., H1N2, H7N9).
+- Genomes from other **aerosolized viruses** such as **PRCV** and **Norovirus**.
+- Their corresponding **merged FASTA files**, used for **sensitivity and specificity calculations** in downstream analysis.
