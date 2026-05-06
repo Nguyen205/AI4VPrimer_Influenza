@@ -135,6 +135,4 @@ All primers passing filters with location, sequence, Tm, and sensitivity on each
 - **True PCR sensitivity:** Both forward AND reverse must match the same sequence
 - **Degeneracy:** Fwd × Rev product should be ≤24 (preferred) or ≤32 (max)
 
-## License
 
-MIT License
