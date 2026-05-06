@@ -4,31 +4,9 @@ This repository contains a set of Jupyter notebooks designed to assist with prim
 
 ## 📂 Notebook Summaries
 
----
 
-### 1. `In_silicon_aijia_degeneracy.ipynb`
 
-**Purpose**:  
-Expands degenerate primers into all possible non-degenerate sequences and evaluates their effectiveness.
-
-**Key Features**:
-- `expand_degenerate_primer(primer)`: Generates all non-degenerate combinations from a degenerate primer.
-- `expand(base)`: Maps individual degenerate bases to their non-degenerate equivalents.
-- `do_primers_work(FP)`: Evaluates a forward primer’s effectiveness based on sequence analysis.
-
-**Use Case**:  
-Ideal for researchers working with degenerate primers to ensure proper expansion and testing before biological application.
-
----
-
-### 2. `In_silicon_aijia.ipynb`
-
-**Purpose**:  
-Checks the **sensitivity** of degenerate primer pairs.
-
----
-
-### 3. `sensitivity and specificity.ipynb`
+### 1. `sensitivity and specificity.ipynb`
 
 **Purpose**:  
 Calculates sensitivity and specificity of primer matches against sequence data.
@@ -41,7 +19,7 @@ Useful for assessing the **precision and recall** of primer-based detection—im
 
 ---
 
-### 4. `merge fasta.ipynb`
+### 2. `merge fasta.ipynb`
 
 **Purpose**:  
 Merges multiple FASTA files into a single consolidated file for easier data handling.
