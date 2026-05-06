@@ -193,16 +193,4 @@ SENS_TARGET = 70.0         # Lower true PCR target
 - Try lowering `MIN_TM` slightly (not below 50°C)
 - Increase `MAX_PRIMER_LEN` to allow longer primers
 
-## Citation
 
-If you use this pipeline in your research, please cite:
-
-> [Your citation information here]
-
-## License
-
-[Your license information here]
-
-## Contact
-
-[Your contact information here]
