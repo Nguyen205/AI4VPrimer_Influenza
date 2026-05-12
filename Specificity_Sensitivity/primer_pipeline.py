@@ -23,11 +23,21 @@ import re, itertools
 # ══════════════════════════════════════════════════════════════════════════════
 GENE_NAME  = 'H5_VN'
 ALN_FILE   = '/Users/aijiazhou/Desktop/Markdown/H5_VN_aligned.fasta'
+
+# Cross-panels for sensitivity check (set to None or {} if not needed)
 CROSS_PANELS = {
     'Asia':   '/Users/aijiazhou/Desktop/Fasta_file/H5_Asia (1).fasta',
     'Global': '/Users/aijiazhou/Desktop/Fasta_file/H5_global.fasta',
 }
+
+# Specificity check file (set to None if not needed)
+# Specificity = % of non-target sequences NOT matched by primer combo
+SPECIFICITY_FILE = None  # e.g., '/path/to/non_target_sequences.fasta'
+
 OUT_FILE   = '/Users/aijiazhou/Desktop/Pipeline for primer design/primer_output.md'
+
+# Number of primers to keep per conserved region (if enough pass filters)
+PRIMERS_PER_REGION = 3
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PARAMETERS
@@ -104,6 +114,28 @@ def ends_clean(p, n=2):
 
 def primer_passes(primer):
     return calc_tm(primer) >= MIN_TM and calc_tm(rc(primer)) >= MIN_TM and dimer_ok(primer)
+
+def calc_gc_content(primer):
+    """Calculate GC content (0-1). For ambiguous bases, use average."""
+    gc_map = {'G':1, 'C':1, 'A':0, 'T':0, 'S':1, 'R':0.5, 'Y':0.5, 'W':0, 'M':0.5, 'K':0.5,
+              'B':0.67, 'D':0.33, 'H':0.33, 'V':0.67, 'N':0.5}
+    return sum(gc_map.get(c.upper(), 0.5) for c in primer) / len(primer)
+
+def has_consecutive_bases(primer, n=4):
+    """Check if primer has n or more consecutive identical bases (AAAA, CCCC, etc.)."""
+    for base in 'ATCG':
+        if base * n in primer.upper():
+            return True
+    return False
+
+def primer_quality_score(primer):
+    """Score primer quality for tiebreaking. Higher is better."""
+    gc = calc_gc_content(primer)
+    # Ideal GC is 40-60% (0.4-0.6), penalize deviation
+    gc_score = 1 - abs(gc - 0.5) * 2  # 1.0 at 50%, 0.8 at 40% or 60%, etc.
+    # Penalize consecutive bases
+    consec_penalty = -0.5 if has_consecutive_bases(primer, 4) else 0
+    return gc_score + consec_penalty
 
 def true_pcr_sens(fseq, rseq, seqs):
     ff = re.compile(p2re(fseq), re.I); fr = re.compile(p2re(rc(fseq)), re.I)
@@ -290,10 +322,18 @@ if __name__ == '__main__':
     vn_seqs = [str(s.seq) for s in raw_seqs]
     print(f"  Design panel: {total} sequences, alignment: {aln_len} bp")
 
+    # Load cross-panels (optional)
     cross_seqs = {}
-    for name, path in CROSS_PANELS.items():
-        cross_seqs[name] = [str(r.seq).replace('-','').upper() for r in SeqIO.parse(path, 'fasta')]
-        print(f"  {name} panel: {len(cross_seqs[name])} sequences")
+    if CROSS_PANELS:
+        for name, path in CROSS_PANELS.items():
+            cross_seqs[name] = [str(r.seq).replace('-','').upper() for r in SeqIO.parse(path, 'fasta')]
+            print(f"  {name} panel: {len(cross_seqs[name])} sequences")
+
+    # Load specificity panel (optional)
+    spec_seqs = None
+    if SPECIFICITY_FILE:
+        spec_seqs = [str(r.seq).replace('-','').upper() for r in SeqIO.parse(SPECIFICITY_FILE, 'fasta')]
+        print(f"  Specificity panel: {len(spec_seqs)} sequences")
 
     # ── Compute identity ──────────────────────────────────────────────────────
     freq = {n: np.zeros(aln_len) for n in nucs + ['-']}
@@ -336,18 +376,30 @@ if __name__ == '__main__':
         aln_s, aln_e = find_aln_pos(trimmed, aln, reg_start, reg_end, aln_len)
         add = fix_ends_add(trimmed, aln_s, aln_e, aln, aln_len)
 
+        # Collect candidates for this region
+        region_candidates = []
         for p, strat in [(rep, 'replace'), (add, 'add-nt')]:
             if not primer_passes(p): continue
             hit = calc_hit(p, raw_seqs)
             tm = calc_tm(p)
-            cross_pct = {name: 100 * calc_hit(p, [_Rec(s) for s in seqs]) / len(seqs) for name, seqs in cross_seqs.items()}
-            primer_pool.append({
+            cross_pct = {name: 100 * calc_hit(p, [_Rec(s) for s in seqs]) / len(seqs) for name, seqs in cross_seqs.items()} if cross_seqs else {}
+            gc = calc_gc_content(p)
+            quality = primer_quality_score(p)
+            region_candidates.append({
                 'primer': p, 'tm': tm, 'pos_start': reg_start, 'pos_end': reg_end,
-                'vn_pct': 100 * hit / total, 'cross_pct': cross_pct, 'strategy': strat
+                'vn_pct': 100 * hit / total, 'cross_pct': cross_pct, 'strategy': strat,
+                'gc': gc, 'quality': quality
             })
-            print(f"  {reg_start}-{reg_end} ({strat}): {p} Tm={tm} VN={100*hit/total:.1f}%")
+        
+        # Sort by sensitivity (desc), then quality score (desc) for tiebreaking
+        region_candidates.sort(key=lambda x: (-x['vn_pct'], -x['quality']))
+        
+        # Keep up to PRIMERS_PER_REGION primers from this region
+        for p in region_candidates[:PRIMERS_PER_REGION]:
+            primer_pool.append(p)
+            print(f"  {reg_start}-{reg_end} ({p['strategy']}): {p['primer']} Tm={p['tm']} VN={p['vn_pct']:.1f}% GC={p['gc']*100:.0f}%")
 
-    # Remove duplicates
+    # Remove duplicates (keep first occurrence which has better score)
     seen = set()
     primer_pool = [p for p in primer_pool if not (p['primer'] in seen or seen.add(p['primer']))]
     print(f"\nPrimer pool: {len(primer_pool)} unique primers passing filters")
@@ -356,6 +408,15 @@ if __name__ == '__main__':
     print("\n" + "="*80)
     print("PRIMER SELECTION")
     print("="*80)
+
+    # Helper function for specificity calculation
+    def calc_specificity(fseq, rseq, seqs):
+        """Specificity = % of non-target sequences NOT matched by primer combo."""
+        if not seqs: return None
+        ff = re.compile(p2re(fseq), re.I); fr = re.compile(p2re(rc(fseq)), re.I)
+        rf = re.compile(p2re(rseq), re.I); rr = re.compile(p2re(rc(rseq)), re.I)
+        matches = sum(1 for s in seqs if (ff.search(s) or fr.search(s)) and (rf.search(s) or rr.search(s)))
+        return round(100 * (1 - matches / len(seqs)), 1)
 
     # Full-length sequencing
     print("\n--- Full-Length Sequencing (500-1200 bp amplicons) ---")
@@ -366,6 +427,10 @@ if __name__ == '__main__':
         print(f"Span: {a['f']['pos_start']}-{b['r']['pos_end']} ({span} bp), overlap: {overlap} bp{relaxed}")
         print(f"  Combo 1: {a['f']['primer']} + {a['r']['primer']} | {a['amp']} bp | True PCR: {s1}%")
         print(f"  Combo 2: {b['f']['primer']} + {b['r']['primer']} | {b['amp']} bp | True PCR: {s2}%")
+        if spec_seqs:
+            spec1 = calc_specificity(a['f']['primer'], a['r']['primer'], spec_seqs)
+            spec2 = calc_specificity(b['f']['primer'], b['r']['primer'], spec_seqs)
+            print(f"  Combo 1 Specificity: {spec1}% | Combo 2 Specificity: {spec2}%")
     else:
         print("No valid overlapping combo found.")
 
@@ -376,6 +441,9 @@ if __name__ == '__main__':
         c, sens = qpcr_result
         print(f"Best pair: {c['f']['primer']} + {c['r']['primer']}")
         print(f"  Amplicon: {c['amp']} bp | True PCR: {sens}%")
+        if spec_seqs:
+            spec = calc_specificity(c['f']['primer'], c['r']['primer'], spec_seqs)
+            print(f"  Specificity: {spec}%")
     else:
         print("No valid qPCR pair found.")
 
@@ -384,11 +452,18 @@ if __name__ == '__main__':
     lines.append(f"**Design panel:** {total} sequences | **Alignment:** {aln_len} bp | **Min Tm:** {MIN_TM}C\n")
     
     lines.append("## Primer Pool\n")
-    lines.append("| Location | Primer | Tm | VN% | " + " | ".join(f"{k}%" for k in cross_seqs.keys()) + " |")
-    lines.append("|---|---|---|---|" + "|".join(["---"]*len(cross_seqs)) + "|")
+    header = "| Location | Primer | Tm | GC% | VN% |"
+    sep = "|---|---|---|---|---|"
+    if cross_seqs:
+        header += " " + " | ".join(f"{k}%" for k in cross_seqs.keys()) + " |"
+        sep += "|".join(["---"]*len(cross_seqs)) + "|"
+    lines.append(header)
+    lines.append(sep)
     for p in sorted(primer_pool, key=lambda x: x['pos_start']):
-        cross_str = " | ".join(f"{p['cross_pct'][k]:.1f}" for k in cross_seqs.keys())
-        lines.append(f"| {p['pos_start']}-{p['pos_end']} | `{p['primer']}` | {p['tm']} | {p['vn_pct']:.1f} | {cross_str} |")
+        row = f"| {p['pos_start']}-{p['pos_end']} | `{p['primer']}` | {p['tm']} | {p['gc']*100:.0f} | {p['vn_pct']:.1f} |"
+        if cross_seqs:
+            row += " " + " | ".join(f"{p['cross_pct'][k]:.1f}" for k in cross_seqs.keys()) + " |"
+        lines.append(row)
 
     lines.append("\n## Selected: Full-Length Sequencing\n")
     if seq_result:
@@ -400,10 +475,16 @@ if __name__ == '__main__':
         lines.append(f"| C1 Rev | `{a['r']['primer']}` | {a['r']['pos_start']}-{a['r']['pos_end']} | {a['r']['tm']} | `{rc(a['r']['primer'])}` |")
         lines.append(f"| C2 Fwd | `{b['f']['primer']}` | {b['f']['pos_start']}-{b['f']['pos_end']} | {b['f']['tm']} | (same) |")
         lines.append(f"| C2 Rev | `{b['r']['primer']}` | {b['r']['pos_start']}-{b['r']['pos_end']} | {b['r']['tm']} | `{rc(b['r']['primer'])}` |")
-        lines.append(f"\n| Amplicon | Size | True PCR VN% |")
-        lines.append("|---|---|---|")
-        lines.append(f"| C1 | {a['amp']} bp | {s1}% |")
-        lines.append(f"| C2 | {b['amp']} bp | {s2}% |")
+        lines.append(f"\n| Amplicon | Size | True PCR VN% |" + (" Specificity% |" if spec_seqs else ""))
+        lines.append("|---|---|---|" + ("---|" if spec_seqs else ""))
+        if spec_seqs:
+            spec1 = calc_specificity(a['f']['primer'], a['r']['primer'], spec_seqs)
+            spec2 = calc_specificity(b['f']['primer'], b['r']['primer'], spec_seqs)
+            lines.append(f"| C1 | {a['amp']} bp | {s1}% | {spec1}% |")
+            lines.append(f"| C2 | {b['amp']} bp | {s2}% | {spec2}% |")
+        else:
+            lines.append(f"| C1 | {a['amp']} bp | {s1}% |")
+            lines.append(f"| C2 | {b['amp']} bp | {s2}% |")
     else:
         lines.append("No valid combo found.\n")
 
@@ -414,7 +495,11 @@ if __name__ == '__main__':
         lines.append("|---|---|---|---|---|")
         lines.append(f"| Fwd | `{c['f']['primer']}` | {c['f']['pos_start']}-{c['f']['pos_end']} | {c['f']['tm']} | (same) |")
         lines.append(f"| Rev | `{c['r']['primer']}` | {c['r']['pos_start']}-{c['r']['pos_end']} | {c['r']['tm']} | `{rc(c['r']['primer'])}` |")
-        lines.append(f"\nAmplicon: {c['amp']} bp | True PCR VN%: {sens}%")
+        spec_str = ""
+        if spec_seqs:
+            spec = calc_specificity(c['f']['primer'], c['r']['primer'], spec_seqs)
+            spec_str = f" | Specificity: {spec}%"
+        lines.append(f"\nAmplicon: {c['amp']} bp | True PCR VN%: {sens}%{spec_str}")
     else:
         lines.append("No valid qPCR pair found.\n")
 
