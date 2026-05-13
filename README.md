@@ -65,11 +65,18 @@ No Python knowledge needed. No risk of accidentally breaking the code.
 
 ### 1. Install
 
+Option 1- with git installed
 ```bash
 git clone https://github.com/YOUR_USERNAME/AI4VPrimer.git
 cd AI4VPrimer
 pip install -r requirements.txt
 ```
+Option 2 — Download ZIP (easier for non-programmers):
+
+   1. Go to your GitHub repo page
+   2. Click the green Code button
+   3. Click Download ZIP
+   4. Unzip the folder
 
 ### 2. Launch the Interface
 
