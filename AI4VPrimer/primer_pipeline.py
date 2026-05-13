@@ -16,28 +16,29 @@ import numpy as np
 from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqUtils import MeltingTemp as mt
-import re, itertools
+import re, itertools, random, math
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONFIG - Modify this section for your gene
 # ══════════════════════════════════════════════════════════════════════════════
-GENE_NAME  = 'H5_VN'
-ALN_FILE   = '/Users/aijiazhou/Desktop/Markdown/H5_VN_aligned.fasta'
+GENE_NAME  = 'N2'
+ALN_FILE   = '/Users/aijiazhou/Desktop/Primer_Vietnam/NA_AIV_VN-CN_aligned.fasta'
 
 # Cross-panels for sensitivity check (set to None or {} if not needed)
-CROSS_PANELS = {
-    'Asia':   '/Users/aijiazhou/Desktop/Fasta_file/H5_Asia (1).fasta',
-    'Global': '/Users/aijiazhou/Desktop/Fasta_file/H5_global.fasta',
-}
+CROSS_PANELS = None
 
 # Specificity check file (set to None if not needed)
 # Specificity = % of non-target sequences NOT matched by primer combo
-SPECIFICITY_FILE = None  # e.g., '/path/to/non_target_sequences.fasta'
+SPECIFICITY_FILE = None
 
-OUT_FILE   = '/Users/aijiazhou/Desktop/Pipeline for primer design/primer_output.md'
+OUT_FILE   = '/Users/aijiazhou/Desktop/N2.md'
 
 # Number of primers to keep per conserved region (if enough pass filters)
-PRIMERS_PER_REGION = 3
+PRIMERS_PER_REGION = 1
+
+# Subsample repetitions for large datasets (>1000 sequences)
+# Set to 0 for auto (ceil(total/1000))
+SUBSAMPLE_REPS = 0
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PARAMETERS
@@ -52,14 +53,14 @@ MIN_TM                  = 51.4
 MAX_LOW_IDENTITY_BRIDGE = 1
 
 # Selection parameters
-MIN_AMP_SEQ      = 500    # min amplicon for sequencing
-MAX_AMP_SEQ      = 1200   # max amplicon for sequencing
-MIN_AMP_QPCR     = 80     # min amplicon for qPCR
-MAX_AMP_QPCR     = 350    # max amplicon for qPCR
-MIN_PRIMER_SENS  = 60.0   # min individual primer sensitivity to enter pool
-SENS_TARGET      = 80.0   # target true PCR sensitivity
-OVERLAP_LIMITS   = [200, 300, 400, 500]  # progressive relaxation
-COMBO_DEGEN_PREFER = 24   # preferred max combo degeneracy (fwd × rev)
+MIN_AMP_SEQ      = 500
+MAX_AMP_SEQ      = 1200
+MIN_AMP_QPCR     = 80
+MAX_AMP_QPCR     = 350
+MIN_PRIMER_SENS  = 60
+SENS_TARGET      = 80
+OVERLAP_LIMITS   = [200, 300, 400, 500]
+COMBO_DEGEN_PREFER = 24
 COMBO_DEGEN_MAX    = 32   # hard max combo degeneracy
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -88,6 +89,12 @@ def calc_hit(primer, seqs):
     fwd = re.compile(p2re(primer), re.I)
     rev = re.compile(p2re(rc(primer)), re.I)
     return sum(1 for s in seqs if fwd.search(str(s.seq)) or rev.search(str(s.seq)))
+
+def calc_hit_fast(primer, seq_strs):
+    """Optimized calc_hit using pre-converted string list."""
+    fwd = re.compile(p2re(primer), re.I)
+    rev = re.compile(p2re(rc(primer)), re.I)
+    return sum(1 for s in seq_strs if fwd.search(s) or rev.search(s))
 
 def calc_tm(seq):
     IUPAC_MIN = {'R':'A','Y':'T','W':'A','S':'C','M':'A','K':'T','B':'T','D':'A','H':'A','V':'A','N':'A'}
@@ -171,17 +178,36 @@ def build_primer(aln, start, end):
 
 def best_trim(primer, seqs, total):
     best_p, best_hit, fallback_p, fallback_hit = None, -1, None, -1
-    for length in range(MIN_REGION_LEN, MAX_PRIMER_LEN + 1):
+    seq_strs = [str(s.seq) for s in seqs]
+    for length in range(MAX_PRIMER_LEN, MIN_REGION_LEN - 1, -1):  # Start from longest
         for start in range(len(primer) - length + 1):
             candidate = primer[start:start + length]
-            hit = calc_hit(candidate, seqs)
-            if calc_tm(candidate) >= MIN_TM and calc_tm(rc(candidate)) >= MIN_TM and hit > best_hit:
+            # Check Tm first (cheap)
+            if calc_tm(candidate) < MIN_TM or calc_tm(rc(candidate)) < MIN_TM:
+                continue
+            # Check dimer (medium cost, but avoids expensive hit calc on bad primers)
+            if not dimer_ok(candidate):
+                continue
+            # Only calc sensitivity for primers passing Tm + dimer
+            hit = calc_hit_fast(candidate, seq_strs)
+            if hit > best_hit:
                 best_hit, best_p = hit, candidate
-            if hit > fallback_hit: fallback_hit, fallback_p = hit, candidate
-    return (best_p, best_hit) if best_p else (fallback_p or primer[:MAX_PRIMER_LEN], fallback_hit if fallback_p else calc_hit(primer[:MAX_PRIMER_LEN], seqs))
+    if best_p:
+        return best_p, best_hit
+    # Fallback: relax dimer check, pick best by hit
+    for length in range(MAX_PRIMER_LEN, MIN_REGION_LEN - 1, -1):
+        for start in range(len(primer) - length + 1):
+            candidate = primer[start:start + length]
+            if calc_tm(candidate) < MIN_TM or calc_tm(rc(candidate)) < MIN_TM:
+                continue
+            hit = calc_hit_fast(candidate, seq_strs)
+            if hit > fallback_hit:
+                fallback_hit, fallback_p = hit, candidate
+    return (fallback_p or primer[:MAX_PRIMER_LEN], fallback_hit if fallback_p else calc_hit(primer[:MAX_PRIMER_LEN], seqs))
 
 def reduce_degeneracy(primer, base_hit, seqs, total, aln, aln_start, aln_len):
     """Remove ambiguous bases if sensitivity loss <2%."""
+    seq_strs = [str(s.seq) for s in seqs]
     result, cur_hit, changed = list(primer), base_hit, True
     while changed:
         changed = False
@@ -190,7 +216,7 @@ def reduce_degeneracy(primer, base_hit, seqs, total, aln, aln_start, aln_len):
             col = [s[aln_start + i] for s in aln if aln_start + i < len(s) and s[aln_start + i] != '-']
             dom = max('ATCG', key=lambda n: col.count(n)) if col else result[i]
             cand = result[:]; cand[i] = dom
-            hit = calc_hit(''.join(cand), seqs)
+            hit = calc_hit_fast(''.join(cand), seq_strs)
             if (cur_hit - hit) / total < 0.02: result[i] = dom; cur_hit = hit; changed = True; break
     def perms(p): return np.prod([DEGEN_VAL.get(c.upper(), 1) for c in p])
     while perms(result) > 24:
@@ -199,7 +225,7 @@ def reduce_degeneracy(primer, base_hit, seqs, total, aln, aln_start, aln_len):
         i, c = max(amb, key=lambda x: DEGEN_VAL.get(x[1].upper(), 1))
         col = [s[aln_start + i] for s in aln if aln_start + i < len(s) and s[aln_start + i] != '-']
         result[i] = max('ATCG', key=lambda n: col.count(n)) if col else 'A'
-    return ''.join(result), calc_hit(''.join(result), seqs)
+    return ''.join(result), calc_hit_fast(''.join(result), seq_strs)
 
 def dominant_bases(primer, raw_seqs):
     fwd, rev = re.compile(p2re(primer), re.I), re.compile(p2re(rc(primer)), re.I)
@@ -308,6 +334,76 @@ def select_qpcr(primers, vn_seqs):
     return best if best else None
 
 # ══════════════════════════════════════════════════════════════════════════════
+# SUBSAMPLE HELPER
+# ══════════════════════════════════════════════════════════════════════════════
+def design_primers_from_seqs(aln_sub, raw_sub, cross_seqs, verbose=True):
+    """Design primers from a subset of aligned sequences. Returns primer_pool list."""
+    aln_len = len(aln_sub[0])
+    total = len(raw_sub)
+
+    # Compute identity
+    freq = {n: np.zeros(aln_len) for n in nucs + ['-']}
+    for seq in aln_sub:
+        for i, base in enumerate(seq):
+            if base in freq: freq[base][i] += 1
+    for k in freq: freq[k] /= len(aln_sub)
+    identity = np.array([max(freq[n][i] for n in nucs) for i in range(aln_len)])
+
+    # Extract regions
+    regions, i = [], 0
+    while i < aln_len:
+        if identity[i] >= IDENTITY_THRESHOLD:
+            start, low_count, j = i, 0, i + 1
+            while j < aln_len:
+                if identity[j] >= IDENTITY_THRESHOLD: low_count = 0; j += 1
+                elif low_count < MAX_LOW_IDENTITY_BRIDGE: low_count += 1; j += 1
+                else: break
+            end = j
+            while end > start and identity[end - 1] < IDENTITY_THRESHOLD: end -= 1
+            if (end - start) >= MIN_REGION_LEN: regions.append((start, end))
+            i = j
+        else: i += 1
+
+    if verbose:
+        print(f"  Found {len(regions)} conserved regions")
+
+    # Design primers
+    primer_pool = []
+    for reg_start, reg_end in regions:
+        raw_primer = build_primer(aln_sub, reg_start, reg_end)
+        trimmed, _ = best_trim(raw_primer, raw_sub, total)
+        aln_s0, _ = find_aln_pos(trimmed, aln_sub, reg_start, reg_end, aln_len)
+        trimmed, _ = reduce_degeneracy(trimmed, calc_hit(trimmed, raw_sub), raw_sub, total, aln_sub, aln_s0, aln_len)
+        rep = fix_ends_replace(trimmed, raw_sub)
+        aln_s, aln_e = find_aln_pos(trimmed, aln_sub, reg_start, reg_end, aln_len)
+        add = fix_ends_add(trimmed, aln_s, aln_e, aln_sub, aln_len)
+
+        region_candidates = []
+        for p, strat in [(rep, 'replace'), (add, 'add-nt')]:
+            if not primer_passes(p): continue
+            hit = calc_hit(p, raw_sub)
+            tm = calc_tm(p)
+            gc = calc_gc_content(p)
+            quality = primer_quality_score(p)
+            cross_pct = {name: 100 * calc_hit(p, [_Rec(s) for s in seqs]) / len(seqs) for name, seqs in cross_seqs.items()} if cross_seqs else {}
+            region_candidates.append({
+                'primer': p, 'tm': tm, 'pos_start': reg_start, 'pos_end': reg_end,
+                'vn_pct': 100 * hit / total, 'cross_pct': cross_pct, 'strategy': strat,
+                'gc': gc, 'quality': quality
+            })
+        region_candidates.sort(key=lambda x: (-x['vn_pct'], -x['quality']))
+        for p in region_candidates[:PRIMERS_PER_REGION]:
+            primer_pool.append(p)
+            if verbose:
+                print(f"    {reg_start}-{reg_end} ({p['strategy']}): {p['primer']} Tm={p['tm']} VN={p['vn_pct']:.1f}%")
+
+    # Deduplicate
+    seen = set()
+    primer_pool = [p for p in primer_pool if not (p['primer'] in seen or seen.add(p['primer']))]
+    return primer_pool
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MAIN PIPELINE
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == '__main__':
@@ -335,73 +431,42 @@ if __name__ == '__main__':
         spec_seqs = [str(r.seq).replace('-','').upper() for r in SeqIO.parse(SPECIFICITY_FILE, 'fasta')]
         print(f"  Specificity panel: {len(spec_seqs)} sequences")
 
-    # ── Compute identity ──────────────────────────────────────────────────────
-    freq = {n: np.zeros(aln_len) for n in nucs + ['-']}
-    for seq in aln:
-        for i, base in enumerate(seq):
-            if base in freq: freq[base][i] += 1
-    for k in freq: freq[k] /= len(aln)
-    identity = np.array([max(freq[n][i] for n in nucs) for i in range(aln_len)])
+    # ── Design primers (branch by sequence count) ───────────────────────────
+    if total <= 1000:
+        print(f"\n  Sequences <= 1000, using standard pipeline...")
+        primer_pool = design_primers_from_seqs(aln, raw_seqs, cross_seqs, verbose=True)
+    else:
+        n_reps = SUBSAMPLE_REPS if SUBSAMPLE_REPS > 0 else math.ceil(total / 1000)
+        print(f"\n  Sequences > 1000, using subsample approach: {n_reps} repetitions of 1000 sequences")
+        all_primers = []
+        for rep in range(n_reps):
+            print(f"\n  --- Subsample {rep+1}/{n_reps} ---")
+            indices = random.sample(range(total), 1000)
+            aln_sub = [aln[i] for i in indices]
+            raw_sub = [raw_seqs[i] for i in indices]
+            rep_primers = design_primers_from_seqs(aln_sub, raw_sub, cross_seqs, verbose=True)
+            all_primers.extend(rep_primers)
+            print(f"    Got {len(rep_primers)} primers from this subsample")
 
-    # ── Extract regions ───────────────────────────────────────────────────────
-    print(f"\nExtracting conserved regions (>={IDENTITY_THRESHOLD*100:.0f}% identity, >={MIN_REGION_LEN} bp)...")
-    regions, i = [], 0
-    while i < aln_len:
-        if identity[i] >= IDENTITY_THRESHOLD:
-            start, low_count, j = i, 0, i + 1
-            while j < aln_len:
-                if identity[j] >= IDENTITY_THRESHOLD: low_count = 0; j += 1
-                elif low_count < MAX_LOW_IDENTITY_BRIDGE: low_count += 1; j += 1
-                else: break
-            end = j
-            while end > start and identity[end - 1] < IDENTITY_THRESHOLD: end -= 1
-            if (end - start) >= MIN_REGION_LEN: regions.append((start, end))
-            i = j
-        else: i += 1
-    print(f"  Found {len(regions)} regions")
+        # Pool and deduplicate
+        seen = set()
+        primer_pool = []
+        for p in all_primers:
+            if p['primer'] not in seen:
+                seen.add(p['primer'])
+                primer_pool.append(p)
+        print(f"\n  Pooled: {len(primer_pool)} unique primers from {n_reps} subsamples")
 
-    # ── Design primers ────────────────────────────────────────────────────────
-    print("\nDesigning primers...")
-    primer_pool = []
-    for reg_start, reg_end in regions:
-        raw_primer = build_primer(aln, reg_start, reg_end)
-        trimmed, _ = best_trim(raw_primer, raw_seqs, total)
-        
-        # Reduce degeneracy (remove ambiguous bases if sensitivity loss <2%)
-        aln_s0, _ = find_aln_pos(trimmed, aln, reg_start, reg_end, aln_len)
-        trimmed, _ = reduce_degeneracy(trimmed, calc_hit(trimmed, raw_seqs), raw_seqs, total, aln, aln_s0, aln_len)
+        # Validate all pooled primers against full dataset
+        print(f"\n  Validating against all {total} sequences...")
+        full_seq_strs = [str(s.seq) for s in raw_seqs]
+        for p in primer_pool:
+            hit = calc_hit_fast(p['primer'], full_seq_strs)
+            p['vn_pct'] = 100 * hit / total
+        primer_pool = [p for p in primer_pool if p['vn_pct'] >= MIN_PRIMER_SENS]
+        primer_pool.sort(key=lambda x: (-x['vn_pct'], -x['quality']))
+        print(f"  After full validation: {len(primer_pool)} primers with >= {MIN_PRIMER_SENS}% sensitivity")
 
-        # Fix ends with two strategies
-        rep = fix_ends_replace(trimmed, raw_seqs)
-        aln_s, aln_e = find_aln_pos(trimmed, aln, reg_start, reg_end, aln_len)
-        add = fix_ends_add(trimmed, aln_s, aln_e, aln, aln_len)
-
-        # Collect candidates for this region
-        region_candidates = []
-        for p, strat in [(rep, 'replace'), (add, 'add-nt')]:
-            if not primer_passes(p): continue
-            hit = calc_hit(p, raw_seqs)
-            tm = calc_tm(p)
-            cross_pct = {name: 100 * calc_hit(p, [_Rec(s) for s in seqs]) / len(seqs) for name, seqs in cross_seqs.items()} if cross_seqs else {}
-            gc = calc_gc_content(p)
-            quality = primer_quality_score(p)
-            region_candidates.append({
-                'primer': p, 'tm': tm, 'pos_start': reg_start, 'pos_end': reg_end,
-                'vn_pct': 100 * hit / total, 'cross_pct': cross_pct, 'strategy': strat,
-                'gc': gc, 'quality': quality
-            })
-        
-        # Sort by sensitivity (desc), then quality score (desc) for tiebreaking
-        region_candidates.sort(key=lambda x: (-x['vn_pct'], -x['quality']))
-        
-        # Keep up to PRIMERS_PER_REGION primers from this region
-        for p in region_candidates[:PRIMERS_PER_REGION]:
-            primer_pool.append(p)
-            print(f"  {reg_start}-{reg_end} ({p['strategy']}): {p['primer']} Tm={p['tm']} VN={p['vn_pct']:.1f}% GC={p['gc']*100:.0f}%")
-
-    # Remove duplicates (keep first occurrence which has better score)
-    seen = set()
-    primer_pool = [p for p in primer_pool if not (p['primer'] in seen or seen.add(p['primer']))]
     print(f"\nPrimer pool: {len(primer_pool)} unique primers passing filters")
 
     # ── Selection ─────────────────────────────────────────────────────────────

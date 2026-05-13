@@ -32,17 +32,31 @@ button:hover { background: #357abd; }
 <button onclick="save()">💾 Save Parameters</button>
 <button onclick="run()" style="background:#28a745;">▶️ Run Pipeline</button>
 <div id="msg" class="msg"></div>
+
+<div id="progress" style="display:none;margin-top:1rem;background:#fff;border:1px solid #ddd;border-radius:4px;padding:1rem;">
+<h3 style="margin-bottom:0.5rem;">Pipeline Steps:</h3>
+<div class="step" id="s1">⬜ 1. Loading alignment sequences</div>
+<div class="step" id="s2">⬜ 2. Computing nucleotide identity</div>
+<div class="step" id="s3">⬜ 3. Extracting conserved regions</div>
+<div class="step" id="s4">⬜ 4. Designing primers (longest step, depends on input size)</div>
+<div class="step" id="s5">⬜ 5. Selecting sequencing primer pairs</div>
+<div class="step" id="s6">⬜ 6. Selecting qPCR primer pair</div>
+<div class="step" id="s7">⬜ 7. Writing output report</div>
+<p id="timer" style="margin-top:0.5rem;color:#888;font-size:0.85rem;"></p>
+</div>
+
 <pre id="output" style="display:none;margin-top:1rem;background:#1e1e1e;color:#d4d4d4;padding:1rem;border-radius:4px;overflow-x:auto;font-size:0.8rem;max-height:400px;overflow-y:auto;"></pre>
 </div>
 
 <script>
 const DESCRIPTIONS = {
   GENE_NAME: '* Gene/target name',
-  ALN_FILE: '* Path to aligned FASTA file',
-  CROSS_PANELS: 'Cross-panel FASTA files (optional, JSON: {"name": "path", ...} or leave empty)',
-  SPECIFICITY_FILE: 'Non-target FASTA for specificity (optional, path or leave empty)',
-  OUT_FILE: '* Output report file path',
+  ALN_FILE: '* Full path to aligned FASTA file (e.g., /Users/you/data/aligned.fasta)',
+  CROSS_PANELS: 'Cross-panel FASTA files (optional, JSON: {"name": "/full/path.fasta", ...} or leave empty)',
+  SPECIFICITY_FILE: 'Non-target FASTA for specificity (optional, full path or leave empty)',
+  OUT_FILE: '* Full path for output report, must end with .md (e.g., /Users/you/Desktop/output.md)',
   PRIMERS_PER_REGION: '* Max primers kept per conserved region',
+  SUBSAMPLE_REPS: 'Subsample repetitions for >1000 sequences (0 = auto)',
   IDENTITY_THRESHOLD: 'Min conservation for region selection (0-1)',
   MIN_REGION_LEN: 'Min conserved region length (bp)',
   MAX_PRIMER_LEN: 'Max primer length (bp)',
@@ -123,17 +137,59 @@ async function save() {
 async function run() {
   const msg = document.getElementById('msg');
   const output = document.getElementById('output');
-  msg.className = 'msg ok'; msg.textContent = '⏳ Running pipeline...';
+  const progress = document.getElementById('progress');
   output.style.display = 'none';
+  progress.style.display = 'none';
+
+  // Validate first
+  msg.className = 'msg ok'; msg.textContent = '🔍 Checking inputs...';
+  const vres = await fetch('/api/validate', {method: 'POST'});
+  const vdata = await vres.json();
+  if (!vdata.valid) {
+    msg.className = 'msg err';
+    msg.textContent = '✗ Input errors:\n• ' + vdata.errors.join('\n• ');
+    msg.style.whiteSpace = 'pre-wrap';
+    return;
+  }
+
+  msg.className = 'msg ok'; msg.textContent = '⏳ Running pipeline...';
+  msg.style.whiteSpace = '';
+  progress.style.display = 'block';
+
+  // Reset steps
+  for (let i = 1; i <= 7; i++) document.getElementById('s'+i).textContent = document.getElementById('s'+i).textContent.replace(/^[✅⬜⏳]/, '⬜');
+
+  // Simulate step progress
+  const steps = [
+    {id:'s1', delay:2000}, {id:'s2', delay:4000}, {id:'s3', delay:6000},
+    {id:'s4', delay:10000}, {id:'s5', delay:0}, {id:'s6', delay:0}, {id:'s7', delay:0}
+  ];
+  for (const s of steps) {
+    if (s.delay > 0) {
+      await new Promise(r => setTimeout(r, s.delay));
+      const el = document.getElementById(s.id);
+      el.textContent = el.textContent.replace(/^⬜/, '⏳');
+    }
+  }
+
   const res = await fetch('/api/run', {method: 'POST'});
   const result = await res.json();
+
+  // Mark all done
+  for (let i = 1; i <= 7; i++) {
+    const el = document.getElementById('s'+i);
+    el.textContent = el.textContent.replace(/^[⬜⏳]/, '✅');
+  }
+
   if (result.returncode === 0) {
     msg.className = 'msg ok'; msg.textContent = '✓ Pipeline completed successfully';
   } else {
-    msg.className = 'msg err'; msg.textContent = '✗ Pipeline failed (see output below)';
+    msg.className = 'msg err';
+    msg.textContent = '✗ Pipeline failed: ' + (result.stderr || 'Unknown error. Check output below.');
+    msg.style.whiteSpace = 'pre-wrap';
   }
   output.style.display = 'block';
-  output.textContent = result.stdout + (result.stderr ? '\n--- ERRORS ---\n' + result.stderr : '');
+  output.textContent = result.stdout + (result.stderr ? '\n--- ERROR ---\n' + result.stderr : '');
 }
 
 load();

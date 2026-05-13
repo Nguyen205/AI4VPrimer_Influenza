@@ -7,10 +7,10 @@ from flask import Flask, jsonify, request, send_file
 import re, os
 
 app = Flask(__name__)
-PIPELINE = os.path.join(os.path.dirname(__file__), 'primer_pipeline.py')
+PIPELINE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'primer_pipeline.py')
 
 # Define which variables belong to CONFIG vs PARAMETERS
-CONFIG_VARS = ['GENE_NAME', 'ALN_FILE', 'CROSS_PANELS', 'SPECIFICITY_FILE', 'OUT_FILE', 'PRIMERS_PER_REGION']
+CONFIG_VARS = ['GENE_NAME', 'ALN_FILE', 'CROSS_PANELS', 'SPECIFICITY_FILE', 'OUT_FILE', 'PRIMERS_PER_REGION', 'SUBSAMPLE_REPS']
 PARAM_VARS = [
     'MAX_PRIMER_LEN',
     'MIN_TM', 'MAX_LOW_IDENTITY_BRIDGE',
@@ -78,9 +78,17 @@ def extract_params(source, var_names):
     return params
 
 
+INT_FIELDS = {'PRIMERS_PER_REGION', 'SUBSAMPLE_REPS', 'MAX_PRIMER_LEN', 'MIN_REGION_LEN', 'MAX_AMB',
+              'MAX_LOW_IDENTITY_BRIDGE', 'MIN_AMP_SEQ', 'MAX_AMP_SEQ', 'MIN_AMP_QPCR',
+              'MAX_AMP_QPCR', 'COMBO_DEGEN_PREFER', 'COMBO_DEGEN_MAX'}
+
+
 def update_pipeline(var, value):
     """Update a single variable assignment in the pipeline source."""
     source = read_pipeline()
+    # Coerce known integer fields
+    if var in INT_FIELDS and value is not None:
+        value = int(value)
     # Format value for Python source
     if isinstance(value, str):
         formatted = f"'{value}'"
@@ -165,11 +173,65 @@ def set_params():
     return jsonify({'status': 'ok'})
 
 
+@app.route('/api/validate', methods=['POST'])
+def validate():
+    """Check inputs before running the pipeline."""
+    source = read_pipeline()
+    params = extract_params(source, CONFIG_VARS)
+    errors = []
+
+    # Check required fields
+    if not params.get('GENE_NAME'):
+        errors.append('GENE_NAME is required.')
+    if not params.get('ALN_FILE'):
+        errors.append('ALN_FILE is required.')
+    elif not os.path.isfile(params['ALN_FILE']):
+        errors.append(f"ALN_FILE not found: {params['ALN_FILE']}")
+    else:
+        # Check if aligned (all sequences same length)
+        try:
+            from Bio import SeqIO
+            records = list(SeqIO.parse(params['ALN_FILE'], 'fasta'))
+            if len(records) < 2:
+                errors.append('ALN_FILE must contain at least 2 sequences.')
+            else:
+                lengths = set(len(r.seq) for r in records)
+                if len(lengths) > 1:
+                    errors.append('ALN_FILE sequences have different lengths — file must be aligned (use MAFFT or MUSCLE first).')
+        except Exception as e:
+            errors.append(f"Cannot read ALN_FILE: {e}")
+
+    if not params.get('OUT_FILE'):
+        errors.append('OUT_FILE is required.')
+    elif not params['OUT_FILE'].endswith('.md'):
+        errors.append('OUT_FILE must end with .md (e.g., /Users/you/Desktop/output.md)')
+
+    # Check cross-panels if provided
+    cross = params.get('CROSS_PANELS')
+    if cross and isinstance(cross, dict):
+        for name, path in cross.items():
+            if not os.path.isfile(path):
+                errors.append(f"CROSS_PANELS '{name}' file not found: {path}")
+
+    spec = params.get('SPECIFICITY_FILE')
+    if spec and not os.path.isfile(spec):
+        errors.append(f"SPECIFICITY_FILE not found: {spec}")
+
+    if errors:
+        return jsonify({'valid': False, 'errors': errors})
+    return jsonify({'valid': True})
+
+
 @app.route('/api/run', methods=['POST'])
 def run_pipeline():
     import subprocess
-    result = subprocess.run(['python', PIPELINE], capture_output=True, text=True, cwd=os.path.dirname(PIPELINE))
-    return jsonify({'stdout': result.stdout, 'stderr': result.stderr, 'returncode': result.returncode})
+    try:
+        result = subprocess.run(['python', PIPELINE], capture_output=True, text=True, cwd=os.path.dirname(PIPELINE), timeout=1800)
+        return jsonify({'stdout': result.stdout, 'stderr': result.stderr, 'returncode': result.returncode})
+    except subprocess.TimeoutExpired:
+        return jsonify({'stdout': '', 'stderr': 'Pipeline timed out after 30 minutes. Your input file may have too many sequences or regions. Try reducing PRIMERS_PER_REGION or using a smaller alignment.', 'returncode': 1})
+    except Exception as e:
+        return jsonify({'stdout': '', 'stderr': f'Pipeline failed to start: {str(e)}', 'returncode': 1})
 
 
 if __name__ == '__main__':
