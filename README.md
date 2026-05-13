@@ -115,8 +115,3 @@ A markdown report with:
 - Recommended qPCR primer pair
 - Reverse complements for PCR ordering
 
----
-
-## License
-
-MIT
